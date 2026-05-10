@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Survival Worm — BFO</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
+  :root {
+    --green:      #4ade80;
+    --green-dim:  #1a4a2e;
+    --green-dark: #0d2a1a;
+    --bg:         #0a0a0a;
+    --panel:      #111;
+    --border:     #1c3326;
+    --muted:      #3a3a3a;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: #fff;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 32px;
+    min-height: 100vh;
+    user-select: none;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+  h1 {
+    font-size: 20px;
+    letter-spacing: 5px;
+    color: var(--green);
+    text-transform: uppercase;
+  }
+  .sub {
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--muted);
+  }
+
+  canvas {
+    display: block;
+    background: #000;
+    border: 1px solid var(--border);
+    box-shadow: 0 0 40px rgba(74, 222, 128, 0.04);
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    width: 800px;
+    margin-top: 12px;
+  }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 10px 14px;
+    border-radius: 3px;
+  }
+  .stat-label {
+    font-size: 9px;
+    letter-spacing: 3px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .stat-value {
+    font-size: 22px;
+    color: var(--green);
+    line-height: 1;
+    margin-top: 3px;
+  }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 28px;
+    margin-top: 14px;
+    width: 800px;
+  }
+  .hint {
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    flex: 1;
+  }
+  .hint span { color: #555; }
+
+  #newGameBtn {
+    background: transparent;
+    color: var(--green);
+    border: 1px solid var(--green-dim);
+    padding: 9px 24px;
+    font-size: 12px;
+    font-family: inherit;
+    letter-spacing: 3px;
+    border-radius: 3px;
+    cursor: pointer;
+    text-transform: uppercase;
+    white-space: nowrap;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  #newGameBtn:hover  { background: var(--green-dim); border-color: var(--green); }
+  #newGameBtn:active { opacity: 0.7; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🐛 Survival Worm</h1>
+  <span class="sub">BFO Algorithm</span>
+</header>
+
+<canvas id="c" width="800" height="600"></canvas>
+
+<div class="stats">
+  <div class="stat"><div class="stat-label">Time</div><div class="stat-value" id="st">0.0s</div></div>
+  <div class="stat"><div class="stat-label">Lives</div><div class="stat-value" id="sl">3</div></div>
+  <div class="stat"><div class="stat-label">Length</div><div class="stat-value" id="sn">1</div></div>
+  <div class="stat"><div class="stat-label">Bots</div><div class="stat-value" id="sb">0</div></div>
+</div>
+
+<div class="controls">
+  <div class="hint">
+    <span>WASD / ARROWS</span> — Move &nbsp;&nbsp;
+    <span>P</span> — Pause
+  </div>
+  <button id="newGameBtn" onclick="newGame()">⟳ New Game</button>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+const CANVAS           = document.getElementById('c');
+const CTX              = CANVAS.getContext('2d');
+const CELL             = 10;
+const COLS             = 80;
+const ROWS             = 60;
+const FOOD_TTL         = 18;    // seconds before food expires
+const INV_DURATION     = 1.5;   // seconds of invincibility after a hit
+const FLASH_DURATION   = 0.25;  // seconds of red screen-flash on hit
+const PLAYER_INT_MIN   = 0.055; // fastest allowed step interval (speed cap)
+const DT_CAP           = 0.10;  // max dt — prevents huge jumps on tab resume
+
+// ─────────────────────────────────────────────────────────────────────────────
+// State factory
+// ─────────────────────────────────────────────────────────────────────────────
+function makeGame() {
+  return {
+    worm:           [{ x: 40, y: 30 }],
+    dir:            { x: 1, y: 0 },
+    nextDir:        { x: 1, y: 0 },
+    food:           [],   // { x, y, ttl }
+    bots:           [],   // { x, y, size, speed }
+
+    // Player movement — fully dt-based, no frame-count tricks
+    moveTimer:      0,
+    playerInterval: 0.12, // seconds/step; shrinks on food pickup
+
+    // Spawn scheduling — thresholds are set once per wave, not re-rolled each frame
+    botTimer:       0,
+    nextBotSpawn:   6.0,
+    foodTimer:      0,
+    nextFoodSpawn:  4.0,
+
+    time:           0,
+    lives:          3,
+    over:           false,
+    paused:         false,
+
+    invTimer:       0,    // countdown; worm is immune while > 0
+    flashTimer:     0,    // countdown; red overlay while > 0
+  };
+}
+
+let game;
+let lastTimestamp = performance.now(); // RAF high-res timestamp
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BFO — Bacterial Foraging Optimisation
+// Movement multiplied by dt → frame-rate independent.
+// speed is in cells / second.
+// ─────────────────────────────────────────────────────────────────────────────
+function bfoUpdate(bot, target, allBots, dt) {
+  const dx   = target.x - bot.x;
+  const dy   = target.y - bot.y;
+  const dist = Math.hypot(dx, dy);
+
+  // Chemotaxis: swim toward the player head
+  const tx = dist > 0.1 ? (dx / dist) * 0.7 : 0;
+  const ty = dist > 0.1 ? (dy / dist) * 0.7 : 0;
+
+  // Swarming: local attraction only (≤ 15 cells).
+  // Previously the radius was 200 — the entire arena — causing all bots
+  // to collapse into one clump instantly.
+  let sx = 0, sy = 0;
+  for (const other of allBots) {
+    if (other === bot) continue;
+    const bx = other.x - bot.x;
+    const by = other.y - bot.y;
+    const bd = Math.hypot(bx, by);
+    if (bd > 0.1 && bd < 15) {
+      sx += (bx / bd) * 0.15;
+      sy += (by / bd) * 0.15;
+    }
+  }
+
+  bot.x = Math.max(0, Math.min(COLS - 1, bot.x + (tx + sx) * bot.speed * dt));
+  bot.y = Math.max(0, Math.min(ROWS - 1, bot.y + (ty + sy) * bot.speed * dt));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spawning
+// ─────────────────────────────────────────────────────────────────────────────
+function spawnBot() {
+  // Store a per-bot sizeFactor (0.20 – 0.75) instead of a baked speed.
+  // Each frame, gameUpdate recomputes bot.speed from the live player speed
+  // so bots always scale with the player and never overtake them.
+  const sizeFactor = 0.20 + Math.random() * 0.55; // 20 % – 75 % of player speed
+  game.bots.push({
+    x:          Math.random() * COLS,
+    y:          Math.random() * ROWS,
+    size:       [1, 2, 3][Math.floor(Math.random() * 3)],
+    sizeFactor, // fraction of player speed this bot uses
+    speed:      0, // set every frame in gameUpdate
+  });
+}
+
+function spawnFood() {
+  // Always spawn — no random skip so the arena never runs dry
+  game.food.push({
+    x:   Math.floor(Math.random() * COLS),
+    y:   Math.floor(Math.random() * ROWS),
+    ttl: FOOD_TTL,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HUD
+// ─────────────────────────────────────────────────────────────────────────────
+function updateHUD() {
+  document.getElementById('st').textContent = game.time.toFixed(1) + 's';
+  document.getElementById('sl').textContent = game.lives;
+  document.getElementById('sn').textContent = game.worm.length;
+  document.getElementById('sb').textContent = game.bots.length;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Game update
+// ─────────────────────────────────────────────────────────────────────────────
+function gameUpdate(dt) {
+  if (game.over || game.paused) return;
+
+  game.time      += dt;
+  game.moveTimer += dt;
+  game.botTimer  += dt;
+  game.foodTimer += dt;
+  if (game.invTimer   > 0) game.invTimer   -= dt;
+  if (game.flashTimer > 0) game.flashTimer -= dt;
+
+  // Expire food (ttl decrements, removed at zero)
+  for (let i = game.food.length - 1; i >= 0; i--) {
+    game.food[i].ttl -= dt;
+    if (game.food[i].ttl <= 0) game.food.splice(i, 1);
+  }
+
+  // Spawn bot wave — threshold stored, not re-rolled each frame
+  if (game.botTimer >= game.nextBotSpawn) {
+    game.botTimer     = 0;
+    game.nextBotSpawn = 5 + Math.random() * 4; // next wave in 5–9 s
+    const count = 1 + Math.floor(Math.random() * 6);
+    for (let i = 0; i < count; i++) spawnBot();
+  }
+
+  // Spawn food — always spawns (no random skip)
+  if (game.foodTimer >= game.nextFoodSpawn) {
+    game.foodTimer     = 0;
+    game.nextFoodSpawn = 4 + Math.random() * 3; // next piece in 4–7 s
+    spawnFood();
+  }
+
+  // Recompute every bot's speed from the LIVE player speed each frame.
+  // Player speed (cells/sec) = 1 / playerInterval.
+  // Each bot's sizeFactor is clamped to [0.20, 0.75] so bots are always
+  // at least 0.25× slower than the player and never faster than 75 % of them.
+  const playerSpeed = 1 / game.playerInterval;
+  for (const bot of game.bots) {
+    const factor = Math.max(0.20, Math.min(0.75, bot.sizeFactor));
+    bot.speed = playerSpeed * factor;
+  }
+
+  // Update bots every frame — continuous, smooth, dt-based
+  const curHead = game.worm[0];
+  for (const bot of game.bots) bfoUpdate(bot, curHead, game.bots, dt);
+
+  // ── Discrete player step ─────────────────────────────────────────────────
+  // Uses an accumulator so step timing is exact regardless of frame rate.
+  if (game.moveTimer < game.playerInterval) return;
+  game.moveTimer -= game.playerInterval; // carry leftover — don't reset to 0
+
+  game.dir = game.nextDir;
+  const head    = game.worm[0];
+  const newHead = {
+    x: (head.x + game.dir.x + COLS) % COLS,
+    y: (head.y + game.dir.y + ROWS) % ROWS,
+  };
+  game.worm.unshift(newHead);
+
+  // Self-collision → immediate game over; return early so nothing else runs
+  for (let i = 1; i < game.worm.length; i++) {
+    if (game.worm[i].x === newHead.x && game.worm[i].y === newHead.y) {
+      game.over = true;
+      updateHUD();
+      return;
+    }
+  }
+
+  // Food pickup — at most one piece per step
+  let ate = false;
+  for (let i = game.food.length - 1; i >= 0; i--) {
+    if (game.food[i].x === newHead.x && game.food[i].y === newHead.y) {
+      game.time          += 10;
+      game.playerInterval = Math.max(PLAYER_INT_MIN, game.playerInterval * 0.95);
+      game.food.splice(i, 1);
+      ate = true;
+      break;
+    }
+  }
+  if (!ate) game.worm.pop(); // maintain length unless growing
+
+  // Bot collision — ignored during invincibility; at most one hit per step
+  if (game.invTimer <= 0) {
+    for (const bot of game.bots) {
+      if (Math.floor(bot.x) === newHead.x && Math.floor(bot.y) === newHead.y) {
+        game.lives--;
+        game.invTimer   = INV_DURATION;
+        game.flashTimer = FLASH_DURATION;
+        if (game.lives <= 0) {
+          game.over = true;
+          updateHUD();
+          return;
+        }
+        break;
+      }
+    }
+  }
+
+  updateHUD();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rendering
+// ─────────────────────────────────────────────────────────────────────────────
+function draw() {
+  const W = CANVAS.width;
+  const H = CANVAS.height;
+
+  // Background
+  CTX.fillStyle = '#000';
+  CTX.fillRect(0, 0, W, H);
+
+  // Subtle grid
+  CTX.strokeStyle = '#080808';
+  CTX.lineWidth   = 0.5;
+  for (let x = 0; x <= COLS; x++) {
+    CTX.beginPath(); CTX.moveTo(x * CELL, 0); CTX.lineTo(x * CELL, H); CTX.stroke();
+  }
+  for (let y = 0; y <= ROWS; y++) {
+    CTX.beginPath(); CTX.moveTo(0, y * CELL); CTX.lineTo(W, y * CELL); CTX.stroke();
+  }
+
+  // Hit flash
+  if (game.flashTimer > 0) {
+    const alpha = (game.flashTimer / FLASH_DURATION) * 0.45;
+    CTX.fillStyle = `rgba(255,0,0,${alpha})`;
+    CTX.fillRect(0, 0, W, H);
+  }
+
+  // Food — fades out during its final 3 seconds
+  for (const f of game.food) {
+    const alpha = Math.min(1, f.ttl / 3);
+    CTX.fillStyle = `rgba(255,65,65,${alpha})`;
+    CTX.beginPath();
+    CTX.arc(f.x * CELL + CELL / 2, f.y * CELL + CELL / 2, CELL / 2 - 1, 0, Math.PI * 2);
+    CTX.fill();
+    // Bright core
+    CTX.fillStyle = `rgba(255,180,180,${alpha * 0.6})`;
+    CTX.beginPath();
+    CTX.arc(f.x * CELL + CELL / 2, f.y * CELL + CELL / 2, 1.5, 0, Math.PI * 2);
+    CTX.fill();
+  }
+
+  // Worm body — tail to neck, brightness fades toward the tail
+  for (let i = game.worm.length - 1; i >= 1; i--) {
+    const s = game.worm[i];
+    const g = Math.max(55, 155 - i * 2);
+    CTX.fillStyle = `rgb(0,${g},0)`;
+    CTX.fillRect(s.x * CELL + 1, s.y * CELL + 1, CELL - 2, CELL - 2);
+  }
+
+  // Worm head — flickers at 12 Hz while invincible
+  const flickerOff = game.invTimer > 0 && (Math.floor(game.invTimer * 12) % 2 === 0);
+  if (!flickerOff && game.worm.length > 0) {
+    const h = game.worm[0];
+    CTX.fillStyle = '#4ade80';
+    CTX.fillRect(h.x * CELL + 1, h.y * CELL + 1, CELL - 2, CELL - 2);
+  }
+
+  // Bots — dark red fill, bright red border
+  for (const b of game.bots) {
+    const bx   = Math.floor(b.x) * CELL;
+    const by   = Math.floor(b.y) * CELL;
+    const size = b.size * CELL;
+    CTX.fillStyle   = '#8b0000';
+    CTX.fillRect(bx + 1, by + 1, size - 2, size - 2);
+    CTX.strokeStyle = '#ff3333';
+    CTX.lineWidth   = 1;
+    CTX.strokeRect(bx + 1.5, by + 1.5, size - 3, size - 3);
+  }
+
+  // ── Overlays ─────────────────────────────────────────────────────────────
+  if (game.paused && !game.over) {
+    CTX.fillStyle    = 'rgba(0,0,0,0.65)';
+    CTX.fillRect(0, 0, W, H);
+    CTX.textAlign    = 'center';
+    CTX.textBaseline = 'middle';
+    CTX.fillStyle    = '#4ade80';
+    CTX.font         = 'bold 42px "Share Tech Mono", monospace';
+    CTX.fillText('PAUSED', W / 2, H / 2 - 16);
+    CTX.fillStyle    = '#3a3a3a';
+    CTX.font         = '15px "Share Tech Mono", monospace';
+    CTX.fillText('P — resume', W / 2, H / 2 + 20);
+    CTX.textAlign    = 'left';
+    CTX.textBaseline = 'alphabetic';
+  }
+
+  if (game.over) {
+    CTX.fillStyle    = 'rgba(0,0,0,0.72)';
+    CTX.fillRect(0, 0, W, H);
+    CTX.textAlign    = 'center';
+    CTX.textBaseline = 'middle';
+    CTX.fillStyle    = '#4ade80';
+    CTX.font         = 'bold 48px "Share Tech Mono", monospace';
+    CTX.fillText('GAME OVER', W / 2, H / 2 - 36);
+    CTX.fillStyle    = '#555';
+    CTX.font         = '16px "Share Tech Mono", monospace';
+    CTX.fillText(
+      `score: ${game.time.toFixed(1)}s   length: ${game.worm.length}`,
+      W / 2, H / 2 + 6
+    );
+    CTX.fillStyle    = '#333';
+    CTX.fillText('press ⟳ NEW GAME to restart', W / 2, H / 2 + 38);
+    CTX.textAlign    = 'left';
+    CTX.textBaseline = 'alphabetic';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Game loop — RAF high-res timestamp, dt capped to prevent tab-resume spikes
+// ─────────────────────────────────────────────────────────────────────────────
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - lastTimestamp) / 1000, DT_CAP);
+  lastTimestamp = timestamp;
+  gameUpdate(dt);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public — new game
+// ─────────────────────────────────────────────────────────────────────────────
+function newGame() {
+  game          = makeGame();
+  lastTimestamp = performance.now(); // reset so first dt isn't inflated
+  updateHUD();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Input
+// ─────────────────────────────────────────────────────────────────────────────
+const ARROW_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+
+document.addEventListener('keydown', e => {
+  if (ARROW_KEYS.has(e.key)) e.preventDefault(); // stop page scrolling
+
+  if (game.over) return;
+
+  const d = game.dir;
+  switch (e.key) {
+    case 'ArrowUp':    case 'w': case 'W':
+      if (d.y === 0) game.nextDir = { x:  0, y: -1 }; break;
+    case 'ArrowDown':  case 's': case 'S':
+      if (d.y === 0) game.nextDir = { x:  0, y:  1 }; break;
+    case 'ArrowLeft':  case 'a': case 'A':
+      if (d.x === 0) game.nextDir = { x: -1, y:  0 }; break;
+    case 'ArrowRight': case 'd': case 'D':
+      if (d.x === 0) game.nextDir = { x:  1, y:  0 }; break;
+    case 'p': case 'P':
+      game.paused = !game.paused; break;
+  }
+});
+
+
+game = makeGame();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
